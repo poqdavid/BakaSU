@@ -48,6 +48,10 @@
 
 #ifdef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
 #define __maybe_static
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
+#error BakaSU does NOT support susfs selinux_hide feature in nongki, Please remove the susfs selinux_hide related code in selinuxfs.c / services.c, selinux_hide still working, but it will handle in BakaSU instead of susfs.
+#endif
 #else
 #define __maybe_static static
 #endif
@@ -97,8 +101,6 @@ enum sel_inos {
 typedef ssize_t (*write_op_fn)(struct file *, char *, size_t);
 
 static write_op_fn *selinux_write_op;
-
-#endif // #ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
 
 static int ksu_security_context_to_sid(struct policydb *orig_policydb, struct sidtab *orig_sidtab,
                                        struct policydb *policydb, struct sidtab *sidtab, const char *scontext,
@@ -170,14 +172,12 @@ static __nocfi void ksu_security_compute_av_user(struct policydb *policydb, stru
 #endif
 // clang-format on
 
-// remove static in susfs
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
-__maybe_static int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext,
-                                                       u32 scontext_len, u32 *sid, u32 def_sid, gfp_t gfp_flags,
-                                                       u32 *orig_sid_p, int *orig_rc_p);
+static int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len,
+                                               u32 *sid, u32 def_sid, gfp_t gfp_flags, u32 *orig_sid_p, int *orig_rc_p);
 
-__maybe_static int security_sid_to_context_with_policy(struct selinux_policy *policy, u32 sid, char **scontext,
-                                                       u32 *scontext_len)
+static int security_sid_to_context_with_policy(struct selinux_policy *policy, u32 sid, char **scontext,
+                                               u32 *scontext_len)
 {
     struct policydb *policydb;
     struct sidtab *sidtab;
@@ -190,8 +190,8 @@ __maybe_static int security_sid_to_context_with_policy(struct selinux_policy *po
     return ksu_security_sid_to_context(policydb, sidtab, sid, scontext, scontext_len);
 }
 
-__maybe_static void security_compute_av_user_with_policy(struct selinux_policy *policy, u32 ssid, u32 tsid, u16 tclass,
-                                                         struct av_decision *avd)
+static void security_compute_av_user_with_policy(struct selinux_policy *policy, u32 ssid, u32 tsid, u16 tclass,
+                                                 struct av_decision *avd)
 {
     struct policydb *policydb;
     struct sidtab *sidtab;
@@ -205,8 +205,6 @@ __maybe_static void security_compute_av_user_with_policy(struct selinux_policy *
     ksu_security_compute_av_user(policydb, sidtab, ssid, tsid, tclass, avd);
 }
 #endif
-
-#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
 
 static write_op_fn *context_write, *access_write;
 static write_op_fn orig_context_write, orig_access_write;
@@ -642,6 +640,21 @@ static void ksu_selinux_hide_unhook()
 
 extern void ksu_register_setprocattr_lsm_hook();
 #else
+// susfs selinux_hide
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len, u32 *sid,
+                                        u32 def_sid, gfp_t gfp_flags);
+int security_sid_to_context_with_policy(struct selinux_policy *policy, u32 sid, char **scontext, u32 *scontext_len);
+void security_compute_av_user_with_policy(struct selinux_policy *policy, u32 ssid, u32 tsid, u16 tclass,
+                                          struct av_decision *avd);
+extern void security_dump_masked_av_fn(struct policydb *policydb, struct context *scontext, struct context *tcontext,
+                                       u16 tclass, u32 permissions, const char *reason);
+extern void context_struct_compute_av_fn(struct policydb *policydb, struct context *scontext, struct context *tcontext,
+                                         u16 tclass, struct av_decision *avd, struct extended_perms *xperms);
+#else
+struct selinux_state fake_state;
+#endif
+
 #define ksu_selinux_hide_unhook()                                                                                      \
     do {                                                                                                               \
     } while (0)
@@ -668,9 +681,15 @@ static int ksu_selinux_hide_enable()
     }
 #endif
 
-#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
-    hook_selinux_status_open();
+#ifdef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+    fake_state.initialized = true;
+    fake_state.policy = backup_sepolicy;
 #endif
+
+#else
+    hook_selinux_status_open();
 
     // clang-format off
 #ifdef CONFIG_KALLSYMS_ALL
@@ -749,7 +768,6 @@ static int ksu_selinux_hide_enable()
 #endif
     // clang-format on
 
-#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
 #ifdef CONFIG_KALLSYMS_ALL
     selinux_write_op = (write_op_fn *)find_kernel_symbol_exact("write_op");
 #else
@@ -1058,6 +1076,7 @@ out:
     mutex_unlock(ksu_selinux_status_lock);
 }
 
+#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
 /*
  * Caveat:  Mutates scontext.
  */
@@ -1210,11 +1229,9 @@ static inline void ksu_unlock_sepolicy_legacy(void)
 #endif
 }
 
-// remove static in susfs
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
-__maybe_static int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext,
-                                                       u32 scontext_len, u32 *sid, u32 def_sid, gfp_t gfp_flags,
-                                                       u32 *orig_sid_p, int *orig_rc_p)
+static int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len,
+                                               u32 *sid, u32 def_sid, gfp_t gfp_flags, u32 *orig_sid_p, int *orig_rc_p)
 #else
 static int ksu_security_context_to_sid(struct policydb *orig_policydb, struct sidtab *orig_sidtab,
                                        struct policydb *policydb, struct sidtab *sidtab, const char *scontext,
@@ -1822,3 +1839,327 @@ allow:
     avd->allowed = 0xffffffff;
     goto out;
 }
+
+#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+/*
+ * Caveat:  Mutates scontext.
+ */
+static int string_to_context_struct(struct policydb *pol, struct sidtab *sidtabp, char *scontext, struct context *ctx,
+                                    u32 def_sid)
+{
+    struct role_datum *role;
+    struct type_datum *typdatum;
+    struct user_datum *usrdatum;
+    char *scontextp, *p, oldc;
+    int rc = 0;
+
+    context_init(ctx);
+
+    /* Parse the security context. */
+
+    rc = -EINVAL;
+    scontextp = scontext;
+
+    /* Extract the user. */
+    p = scontextp;
+    while (*p && *p != ':')
+        p++;
+
+    if (*p == 0)
+        goto out;
+
+    *p++ = 0;
+
+    usrdatum = symtab_search(&pol->p_users, scontextp);
+    if (!usrdatum)
+        goto out;
+
+    ctx->user = usrdatum->value;
+
+    /* Extract role. */
+    scontextp = p;
+    while (*p && *p != ':')
+        p++;
+
+    if (*p == 0)
+        goto out;
+
+    *p++ = 0;
+
+    role = symtab_search(&pol->p_roles, scontextp);
+    if (!role)
+        goto out;
+    ctx->role = role->value;
+
+    /* Extract type. */
+    scontextp = p;
+    while (*p && *p != ':')
+        p++;
+    oldc = *p;
+    *p++ = 0;
+
+    typdatum = symtab_search(&pol->p_types, scontextp);
+    if (!typdatum || typdatum->attribute)
+        goto out;
+
+    ctx->type = typdatum->value;
+
+    rc = mls_context_to_sid(pol, oldc, p, ctx, sidtabp, def_sid);
+    if (rc)
+        goto out;
+
+    /* Check the validity of the new context. */
+    rc = -EINVAL;
+    if (!policydb_context_isvalid(pol, ctx))
+        goto out;
+    rc = 0;
+out:
+    if (rc)
+        context_destroy(ctx);
+    return rc;
+}
+
+int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len, u32 *sid,
+                                        u32 def_sid, gfp_t gfp_flags)
+{
+    struct policydb *policydb;
+    struct sidtab *sidtab;
+    char *scontext2, *str = NULL;
+    struct context context;
+    int rc = 0;
+
+    /* An empty security context is never valid. */
+    if (!scontext_len)
+        return -EINVAL;
+
+    /* Copy the string to allow changes and ensure a NUL terminator */
+    scontext2 = kmemdup_nul(scontext, scontext_len, gfp_flags);
+    if (!scontext2)
+        return -ENOMEM;
+
+    // removed: if (!selinux_initialized())
+    *sid = SECSID_NULL;
+
+    // removed: if (force)
+    // removed: rcu lock
+    policydb = &policy->policydb;
+    sidtab = policy->sidtab;
+    rc = string_to_context_struct(policydb, sidtab, scontext2, &context, def_sid);
+    if (rc)
+        goto out;
+    rc = sidtab_context_to_sid(sidtab, &context, sid);
+    // rc should not be frozen
+    if (rc)
+        goto out;
+    // removed: if (rc == -ESTALE)
+    context_destroy(&context);
+out:
+    kfree(scontext2);
+    kfree(str);
+    return rc;
+}
+
+/*
+ * Write the security context string representation of
+ * the context structure `context' into a dynamically
+ * allocated string of the correct size.  Set `*scontext'
+ * to point to this string and set `*scontext_len' to
+ * the length of the string.
+ */
+static int context_struct_to_string(struct policydb *p, struct context *context, char **scontext, u32 *scontext_len)
+{
+    char *scontextp;
+
+    if (scontext)
+        *scontext = NULL;
+    *scontext_len = 0;
+
+    if (context->len) {
+        *scontext_len = context->len;
+        if (scontext) {
+            *scontext = kstrdup(context->str, GFP_ATOMIC);
+            if (!(*scontext))
+                return -ENOMEM;
+        }
+        return 0;
+    }
+
+    /* Compute the size of the context. */
+    *scontext_len += strlen(sym_name(p, SYM_USERS, context->user - 1)) + 1;
+    *scontext_len += strlen(sym_name(p, SYM_ROLES, context->role - 1)) + 1;
+    *scontext_len += strlen(sym_name(p, SYM_TYPES, context->type - 1)) + 1;
+    *scontext_len += mls_compute_context_len(p, context);
+
+    if (!scontext)
+        return 0;
+
+    /* Allocate space for the context; caller must free this space. */
+    scontextp = kmalloc(*scontext_len, GFP_ATOMIC);
+    if (!scontextp)
+        return -ENOMEM;
+    *scontext = scontextp;
+
+    /*
+     * Copy the user name, role name and type name into the context.
+     */
+    scontextp += sprintf(scontextp, "%s:%s:%s", sym_name(p, SYM_USERS, context->user - 1),
+                         sym_name(p, SYM_ROLES, context->role - 1), sym_name(p, SYM_TYPES, context->type - 1));
+
+    mls_sid_to_context(p, context, &scontextp);
+
+    *scontextp = 0;
+
+    return 0;
+}
+
+static int sidtab_entry_to_string(struct policydb *p, struct sidtab *sidtab, struct sidtab_entry *entry,
+                                  char **scontext, u32 *scontext_len)
+{
+    int rc = sidtab_sid2str_get(sidtab, entry, scontext, scontext_len);
+
+    if (rc != -ENOENT)
+        return rc;
+
+    rc = context_struct_to_string(p, &entry->context, scontext, scontext_len);
+    if (!rc && scontext)
+        sidtab_sid2str_put(sidtab, entry, *scontext, *scontext_len);
+    return rc;
+}
+
+int security_sid_to_context_with_policy(struct selinux_policy *policy, u32 sid, char **scontext, u32 *scontext_len)
+{
+    struct policydb *policydb;
+    struct sidtab *sidtab;
+    struct sidtab_entry *entry;
+    int rc = 0;
+
+    if (scontext)
+        *scontext = NULL;
+    *scontext_len = 0;
+
+    // removed: if (!selinux_initialized())
+    // removed: rcu lock
+    policydb = &policy->policydb;
+    sidtab = policy->sidtab;
+
+    // removed: force
+    entry = sidtab_search_entry(sidtab, sid);
+    if (!entry) {
+        pr_err("SELinux: %s:  unrecognized SID %d\n", __func__, sid);
+        rc = -EINVAL;
+        goto out_unlock;
+    }
+    // removed: only_invalid
+
+    rc = sidtab_entry_to_string(policydb, sidtab, entry, scontext, scontext_len);
+
+out_unlock:
+    return rc;
+}
+
+static void avd_init(struct selinux_policy *policy, struct av_decision *avd)
+{
+    avd->allowed = 0;
+    avd->auditallow = 0;
+    avd->auditdeny = 0xffffffff;
+    if (policy)
+        avd->seqno = policy->latest_granting;
+    else
+        avd->seqno = 0;
+    avd->flags = 0;
+}
+
+/*
+ * security_boundary_permission - drops violated permissions
+ * on boundary constraint.
+ */
+static void __nocfi type_attribute_bounds_av(struct policydb *policydb, struct context *scontext,
+                                             struct context *tcontext, u16 tclass, struct av_decision *avd)
+{
+    struct context lo_scontext;
+    struct context lo_tcontext, *tcontextp = tcontext;
+    struct av_decision lo_avd;
+    struct type_datum *source;
+    struct type_datum *target;
+    u32 masked = 0;
+
+    source = policydb->type_val_to_struct[scontext->type - 1];
+    BUG_ON(!source);
+
+    if (!source->bounds)
+        return;
+
+    target = policydb->type_val_to_struct[tcontext->type - 1];
+    BUG_ON(!target);
+
+    memset(&lo_avd, 0, sizeof(lo_avd));
+
+    memcpy(&lo_scontext, scontext, sizeof(lo_scontext));
+    lo_scontext.type = source->bounds;
+
+    if (target->bounds) {
+        memcpy(&lo_tcontext, tcontext, sizeof(lo_tcontext));
+        lo_tcontext.type = target->bounds;
+        tcontextp = &lo_tcontext;
+    }
+
+    security_dump_masked_av_fn(policydb, &lo_scontext, tcontextp, tclass, &lo_avd, NULL);
+
+    masked = ~lo_avd.allowed & avd->allowed;
+
+    if (likely(!masked))
+        return; /* no masked permission */
+
+    /* mask violated permissions */
+    avd->allowed &= ~masked;
+
+    /* audit masked permissions */
+    security_dump_masked_av_fn(policydb, scontext, tcontext, tclass, masked, "bounds");
+}
+
+void security_compute_av_user_with_policy(struct selinux_policy *policy, u32 ssid, u32 tsid, u16 tclass,
+                                          struct av_decision *avd)
+{
+    struct policydb *policydb;
+    struct sidtab *sidtab;
+    struct context *scontext = NULL, *tcontext = NULL;
+
+    // remove: rcu lock
+    avd_init(policy, avd);
+    // remove: if (!selinux_initialized())
+
+    policydb = &policy->policydb;
+    sidtab = policy->sidtab;
+
+    scontext = sidtab_search(sidtab, ssid);
+    if (!scontext) {
+        pr_err("SELinux: %s:  unrecognized SID %d\n", __func__, ssid);
+        goto out;
+    }
+
+    /* permissive domain? */
+    if (ebitmap_get_bit(&policydb->permissive_map, scontext->type))
+        avd->flags |= AVD_FLAGS_PERMISSIVE;
+
+    tcontext = sidtab_search(sidtab, tsid);
+    if (!tcontext) {
+        pr_err("SELinux: %s:  unrecognized SID %d\n", __func__, tsid);
+        goto out;
+    }
+
+    if (unlikely(!tclass)) {
+        if (policydb->allow_unknown)
+            goto allow;
+        goto out;
+    }
+
+    context_struct_compute_av_fn(policydb, scontext, tcontext, tclass, avd, NULL);
+out:
+    return;
+allow:
+    avd->allowed = 0xffffffff;
+    goto out;
+}
+#endif
+#endif
