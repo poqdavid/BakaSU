@@ -209,6 +209,8 @@ static void security_compute_av_user_with_policy(struct selinux_policy *policy, 
 static write_op_fn *context_write, *access_write;
 static write_op_fn orig_context_write, orig_access_write;
 
+#endif
+
 // 6.6+ or 4.14-
 // android has backport in 4.14
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) ||                                                                   \
@@ -235,12 +237,14 @@ static inline u32 current_sid(void)
 }
 #endif
 
-static ssize_t my_write_context(struct file *file, char *buf, size_t size)
+__maybe_static ssize_t my_write_context(struct file *file, char *buf, size_t size)
 {
+#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
     // apply to all app uids
     if (likely(ksu_get_uid_t(current_uid()) < 10000)) {
         return orig_context_write(file, buf, size);
     }
+#endif
     char *canon = NULL;
     u32 sid, len;
     ssize_t length;
@@ -299,12 +303,14 @@ out:
     return length;
 }
 
-static ssize_t my_write_access(struct file *file, char *buf, size_t size)
+__maybe_static ssize_t my_write_access(struct file *file, char *buf, size_t size)
 {
+#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
     // apply to all app uids
     if (likely(ksu_get_uid_t(current_uid()) < 10000)) {
         return orig_access_write(file, buf, size);
     }
+#endif
     char *scon = NULL, *tcon = NULL;
     u32 ssid, tsid, sconlen, tconlen;
     u16 tclass;
@@ -430,18 +436,24 @@ static u32 ptrace_parent_sid(void)
     return sid;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && !defined(KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE)
-struct ksu_lsm_hook selinux_setprocattr_hook =
-    KSU_LSM_HOOK_INIT(setprocattr, "selinux_setprocattr", ksu_handle_selinux_setprocattr, 0);
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) &&                                                                   \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0) || defined(KSU_COMPAT_HAS_LIST_OF_LSM_HOOKS))
-static setprocattr_fn ksu_orig_setprocattr;
-uintptr_t selinux_setprocattr_hook_ptr = 0;
+// clang-format off
+#ifdef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
+    #define ksu_handle_selinux_setprocattr my_setprocattr
 #else
-extern setprocattr_fn ksu_orig_setprocattr;
+    #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && !defined(KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE)
+        struct ksu_lsm_hook selinux_setprocattr_hook =
+            KSU_LSM_HOOK_INIT(setprocattr, "selinux_setprocattr", ksu_handle_selinux_setprocattr, 0);
+    #endif
+
+    #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) &&                                                                   \
+        (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0) || defined(KSU_COMPAT_HAS_LIST_OF_LSM_HOOKS))
+        static setprocattr_fn ksu_orig_setprocattr;
+        uintptr_t selinux_setprocattr_hook_ptr = 0;
+    #else
+        extern setprocattr_fn ksu_orig_setprocattr;
+    #endif
 #endif
+// clang-format on
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0) || defined(KSU_COMPAT_SETPROCATTR_USE_NEW_PROTOTYPE)
 int __nocfi ksu_handle_selinux_setprocattr(const char *name, void *value, size_t size)
@@ -449,6 +461,7 @@ int __nocfi ksu_handle_selinux_setprocattr(const char *name, void *value, size_t
 int __nocfi ksu_handle_selinux_setprocattr(struct task_struct *p, char *name, void *value, size_t size)
 #endif
 {
+#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
     if (likely(ksu_get_uid_t(current_uid()) < 10000)) {
         goto call_orig;
     }
@@ -456,6 +469,7 @@ int __nocfi ksu_handle_selinux_setprocattr(struct task_struct *p, char *name, vo
     if (strcmp(name, "current")) {
         goto call_orig;
     }
+#endif
 
     struct ksu_task_security_struct *tsec;
     struct cred *new;
@@ -537,6 +551,7 @@ abort_change:
     abort_creds(new);
     return error;
 
+#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
 call_orig:
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
     return ((setprocattr_fn)selinux_setprocattr_hook.original)(name, value, size);
@@ -545,17 +560,16 @@ call_orig:
 #else
     return ksu_orig_setprocattr(p, name, value, size);
 #endif
+#endif
 }
 
+#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
 typedef int (*sel_open_handle_status_fn)(struct inode *inode, struct file *filp);
 static sel_open_handle_status_fn orig_sel_open_handle_status, *sel_open_handle_status_slot;
 static int my_sel_open_handle_status(struct inode *inode, struct file *filp)
 {
     if (likely(ksu_get_uid_t(current_uid()) >= 10000 && ksu_selinux_hide_enabled)) {
-        void *data;
-        mutex_lock(ksu_selinux_status_lock);
-        data = fake_status;
-        mutex_unlock(ksu_selinux_status_lock);
+        void *data = fake_status;
         if (data) {
             filp->private_data = data;
             return 0;
